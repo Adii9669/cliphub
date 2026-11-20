@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "adii9669.clipboard-hub",
+  "name": "Clipboard Hub",
+  "version": "1.0.0",
+  "author": "Adii9669",
+  "description": "Unified Omarchy clipboard history and emoji picker with pins, delete, clear-all, image previews, and a single bar button",
+  "license": "MIT",
+  "repository": "https://github.com/Adii9669/cliphub",
+  "kinds": [
+    "overlay",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "ClipboardHub.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Clipboard Hub",
+    "description": "Clipboard history and emoji picker in one menu",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
