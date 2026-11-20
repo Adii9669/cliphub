@@ -49,18 +49,24 @@ Item {
   readonly property int cornerRadius: Style.cornerRadius
   property string fontFamily: Style.font.menuFamily
   // Compact sizing
-  property int contentMargin: Style.space(10)
+  // Small-screen layout: collapse the detail pane and use the full width for
+  // the list, with an eye/back button in the header to toggle it.
+  property bool compactLayout: cardWidth < Style.space(560)
+  property bool compactPreview: false
+  property int contentMargin: compactLayout ? Style.space(8) : Style.space(10)
   property int headerHeight: Math.max(Style.space(30), Style.font.body + Style.spacing.controlPaddingY * 2)
   property int contentSpacing: Style.space(6)
   property int cardWidth: Math.min(Style.space(680), panel.width - Style.gapsOut * 2)
   property int cardHeight: Math.min(Style.space(460), panel.height - Style.gapsOut * 2)
-  property int rowHeight: Math.max(Style.space(46), Style.font.body + Style.spacing.rowPaddingX + Style.space(8))
-  property int actionButtonWidth: Style.space(28)
+  property int rowHeight: Math.max(compactLayout ? Style.space(42) : Style.space(46), Style.font.body + Style.spacing.rowPaddingX + Style.space(8))
+  property int actionButtonWidth: compactLayout ? Style.space(24) : Style.space(28)
+  property int rowThumbSize: compactLayout ? Style.space(28) : Style.space(40)
 
-  // Fewer/larger emoji cells so each glyph is clearly visible
-  property int emojiColumns: Math.max(4, Math.floor((cardWidth - contentMargin * 2) / emojiCellWidth))
-  property int emojiCellWidth: Math.max(Style.space(68), Style.font.display + Style.spacing.lg)
-  property int emojiCellHeight: Math.max(Style.space(68), Style.font.display + Style.spacing.lg)
+  // Emoji cells adapt to the available width. The column count is taken from
+  // the GridView itself so arrow-key navigation always matches what is drawn.
+  property int emojiCellWidth: Math.max(Style.space(44), Math.min(Style.space(68), Math.floor((cardWidth - contentMargin * 2) / 5)))
+  property int emojiCellHeight: emojiCellWidth
+  property int emojiColumns: Math.max(1, Math.floor(emojiGrid.width / emojiCellWidth))
 
   function open(payloadJson) {
     var payload = {}
@@ -75,6 +81,7 @@ Item {
 
     root.opened = true
     root.activeTab = requestedTab
+    root.compactPreview = false
     root.filterText = ""
     root.selectedIndex = 0
     root.cursorActive = true
@@ -94,6 +101,8 @@ Item {
     Qt.callLater(function() { filterInput.forceActiveFocus() })
   }
 
+  onCompactLayoutChanged: if (!compactLayout) compactPreview = false
+
   function close() {
     root.cancelClearUnpinned()
     root.opened = false
@@ -108,6 +117,7 @@ Item {
     var next = String(tab || "clipboard")
     if (next !== "emoji" && next !== "clipboard") next = "clipboard"
     root.activeTab = next
+    root.compactPreview = false
     if (next === "clipboard") {
       root.rebuildClipboardDisplay()
     } else {
@@ -631,7 +641,7 @@ Item {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               visible: root.activeTab === "clipboard"
-              width: Math.max(Style.space(58), clearLabel.implicitWidth + Style.space(10))
+              width: root.compactLayout ? root.headerHeight : Math.max(Style.space(58), clearLabel.implicitWidth + Style.space(10))
               height: parent.height
               radius: root.cornerRadius
               color: clearMouse.containsMouse ? Util.alpha(root.selectionBackground, 0.5) : "transparent"
@@ -643,10 +653,10 @@ Item {
                 id: clearLabel
                 anchors.centerIn: parent
                 textFormat: Text.PlainText
-                text: "Clear all"
+                text: root.compactLayout ? "󰆴" : "Clear all"
                 color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.family: root.compactLayout ? "JetBrainsMono Nerd Font" : root.fontFamily
+                font.pixelSize: root.compactLayout ? Style.font.iconLarge : Style.font.body
               }
               MouseArea {
                 id: clearMouse
@@ -658,10 +668,39 @@ Item {
             }
 
             Rectangle {
+              id: detailBtn
+              visible: root.activeTab === "clipboard" && root.compactLayout
+              anchors.right: clearBtn.left
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              width: root.headerHeight
+              height: parent.height
+              radius: root.cornerRadius
+              color: detailMouse.containsMouse ? Util.alpha(root.selectionBackground, 0.35) : "transparent"
+              border.width: 1
+              border.color: Util.alpha(root.border, 0.25)
+
+              Text {
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: root.compactPreview ? "󰅁" : "󰈈"
+                color: root.foreground
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: Style.font.iconLarge
+              }
+              MouseArea {
+                id: detailMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                onClicked: root.compactPreview = !root.compactPreview
+              }
+            }
+
+            Rectangle {
               id: searchBox
               anchors.left: emojiTab.right
               anchors.leftMargin: Style.space(8)
-              anchors.right: root.activeTab === "clipboard" ? clearBtn.left : parent.right
+              anchors.right: root.activeTab === "clipboard" ? (root.compactLayout ? detailBtn.left : clearBtn.left) : parent.right
               anchors.rightMargin: root.activeTab === "clipboard" ? Style.space(8) : 0
               anchors.verticalCenter: parent.verticalCenter
               height: parent.height
@@ -723,7 +762,8 @@ Item {
                 spacing: 0
 
                 Item {
-                  width: parent.width * 0.68
+                  width: root.compactLayout ? parent.width : (root.compactPreview ? 0 : parent.width * 0.68)
+                  visible: width > 0
                   height: parent.height
                   clip: true
 
@@ -806,7 +846,7 @@ Item {
                             SizedImage {
                               id: rowThumb
                               visible: rowItem.previewImage.length > 0
-                              width: visible ? Math.min(parent.height, Style.space(40)) : 0
+                              width: visible ? Math.min(parent.height, root.rowThumbSize) : 0
                               height: parent.height
                               url: rowItem.previewImage
                               asynchronous: true
@@ -921,7 +961,8 @@ Item {
                 }
 
                 Item {
-                  width: parent.width * 0.32
+                  width: root.compactLayout ? (root.compactPreview ? parent.width : 0) : parent.width * 0.32
+                  visible: width > 0
                   height: parent.height
                   clip: true
                   property var activeRow: clipboardModel.count > 0 && root.selectedIndex >= 0 && root.selectedIndex < clipboardModel.count ? clipboardModel.get(root.selectedIndex) : null

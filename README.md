@@ -15,6 +15,15 @@ Clipboard history supports pinned items, per-item delete, clear-all that preserv
 - Click any clipboard row to copy that text; `Enter` pastes, `Shift+Enter` copies only
 - Emoji search with keyboard navigation and insertion
 - Compact, theme-aware overlay; no changes to `/usr/share/omarchy/`
+- Responsive: the card shrinks to fit the screen, with a narrow-screen layout below ~560px
+
+## Responsive behavior
+
+- The card is capped at 680×460 and otherwise sized to the screen minus the shell's outer gaps, so it never overflows the display.
+- Wide screens keep the 68% list / 32% detail split.
+- Below ~560px, the list uses the full width, the detail pane becomes a toggleable full-width view (eye/back icon in the header), "Clear all" becomes a trash icon, and thumbnails/action buttons shrink slightly.
+- Emoji cells scale between 44px and 68px based on available width; the keyboard column count is derived from the actual grid, so arrow navigation stays correct at any size.
+- Short screens simply show fewer rows; both lists scroll.
 
 ## Requirements
 
