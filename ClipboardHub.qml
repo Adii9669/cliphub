@@ -35,6 +35,7 @@ Item {
   property string pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/adii9669.clipboard-hub"
   property string captureScript: pluginDir + "/capture.sh"
   property string pasteTextScript: pluginDir + "/paste-text.sh"
+  property string emojiInsertScript: pluginDir + "/insert-emoji.sh"
 
   property color background: Commons.Color.menu.background
   property color foreground: Commons.Color.menu.text
@@ -388,7 +389,7 @@ Item {
     var row = emojiModel.get(index)
     if (!row || !row.emoji) return
     root.opened = false
-    Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-menu-emoji-insert", row.emoji])
+    Quickshell.execDetached([root.emojiInsertScript, row.emoji])
   }
 
   Component.onCompleted: initProc.running = true

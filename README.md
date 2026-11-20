@@ -13,7 +13,7 @@ Clipboard history supports pinned items, per-item delete, clear-all that preserv
 - Clipboard: pinned section at the top, pin/unpin, copy, delete, and `Clear all` (unpinned only)
 - Image clipboard entries are stored and previewed as thumbnails
 - Click any clipboard row to copy that text; `Enter` pastes, `Shift+Enter` copies only
-- Emoji search with keyboard navigation and insertion
+- Emoji search with keyboard navigation and insertion via standard `Ctrl+V` (works in browsers and terminals)
 - Compact, theme-aware overlay; no changes to `/usr/share/omarchy/`
 - Responsive: the card shrinks to fit the screen, with a narrow-screen layout below ~560px
 
