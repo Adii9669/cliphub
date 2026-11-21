@@ -1,8 +1,29 @@
 var displayTextLimit = 8192
 
+// Stable, content-derived IDs let row actions target the exact item the user
+// selected, even if the underlying history is reordered before the click.
+function hashString(value) {
+  var str = String(value || "")
+  var h = 0x811c9dc5
+  for (var i = 0; i < str.length; i++) {
+    h = Math.imul(h ^ str.charCodeAt(i), 0x01000193) >>> 0
+  }
+  return ("00000000" + h.toString(16)).slice(-8)
+}
+
+function makeId(entry) {
+  if (!entry) return ""
+  if (entry.type === "image") return "image:" + String(entry.path || "")
+  return "text:" + hashString(String(entry.text || ""))
+}
+
 function normalizeEntry(value) {
-  if (typeof value === "string")
-    return value.trim().length > 0 ? { type: "text", text: value, pinned: false } : null
+  if (typeof value === "string") {
+    if (value.trim().length === 0) return null
+    var s = { type: "text", text: value, pinned: false }
+    s.id = makeId(s)
+    return s
+  }
 
   if (!value || typeof value !== "object") return null
 
@@ -13,6 +34,7 @@ function normalizeEntry(value) {
     var text = String(value.text || "")
     if (text.trim().length === 0) return null
     var t = { type: "text", text: text, pinned: pinned }
+    t.id = String(value.id || "") || makeId(t)
     if (value.updatedAt !== undefined && value.updatedAt !== null) t.updatedAt = String(value.updatedAt)
     return t
   }
@@ -26,6 +48,7 @@ function normalizeEntry(value) {
       mime: String(value.mime || "image/png"),
       pinned: pinned
     }
+    img.id = String(value.id || "") || makeId(img)
     if (value.capturedAt !== undefined && value.capturedAt !== null)
       img.capturedAt = String(value.capturedAt)
     if (value.updatedAt !== undefined && value.updatedAt !== null)
@@ -128,30 +151,30 @@ function capUnpinned(history, unpinnedLimit) {
   return out
 }
 
-function togglePinned(history, historyIndex) {
+function togglePinnedById(history, id) {
   var values = Array.isArray(history) ? history : []
-  var idx = Number(historyIndex)
-  if (isNaN(idx) || idx < 0 || idx >= values.length) return values.slice()
+  var wanted = String(id || "")
+  if (!wanted) return values.slice()
   var out = []
   for (var i = 0; i < values.length; i++) {
     var e = normalizeEntry(values[i])
     if (!e) continue
-    if (i === idx) e.pinned = !e.pinned
+    if (String(e.id || makeId(e)) === wanted) e.pinned = !e.pinned
     out.push(e)
   }
-  // keep overall order stable; UI will group by pinned
   return out
 }
 
-function removeEntryAt(history, historyIndex) {
+function removeById(history, id) {
   var values = Array.isArray(history) ? history : []
-  var idx = Number(historyIndex)
-  if (isNaN(idx) || idx < 0 || idx >= values.length) return values.slice()
+  var wanted = String(id || "")
+  if (!wanted) return values.slice()
   var out = []
   for (var i = 0; i < values.length; i++) {
-    if (i === idx) continue
     var e = normalizeEntry(values[i])
-    if (e) out.push(e)
+    if (!e) continue
+    if (String(e.id || makeId(e)) === wanted) continue
+    out.push(e)
   }
   return out
 }
@@ -239,23 +262,31 @@ function fullText(entry) {
 function cappedEntry(entry) {
   if (!entry || entry.type !== "text" || entry.text.length <= displayTextLimit) return entry
   var cut = entry.text.lastIndexOf("\n", displayTextLimit)
-  return { type: "text", text: entry.text.slice(0, cut > 0 ? cut : displayTextLimit), pinned: !!entry.pinned }
+  return {
+    type: "text",
+    text: entry.text.slice(0, cut > 0 ? cut : displayTextLimit),
+    pinned: !!entry.pinned,
+    id: entry.id
+  }
 }
 
-function buildRow(entry, historyIndex, tr) {
+function buildRow(entry, tr, fullEntry) {
   var t = typeof tr === "function" ? tr : function(key, fallback) { return fallback || key }
   var paths = filePaths(entry)
   var isFile = paths.length > 0
   var isImage = entry.type === "image"
+  var source = fullEntry || entry
   var previewPath = isImage ? String(entry.path || "") : (isFile && paths.length === 1 && isImagePath(paths[0]) ? paths[0] : "")
   return {
     entryType: isFile ? "file" : entry.type,
+    entryId: String(source.id || makeId(source)),
     fullText: isImage ? "" : fullText(entry),
+    // Paste/copy use the uncapped source text, never the shortened preview.
+    pasteText: isImage ? "" : String(source.text || ""),
     previewText: previewText(entry),
     previewImage: previewPath,
     path: isImage ? String(entry.path || "") : (isFile && paths.length === 1 ? paths[0] : ""),
     mime: isImage ? String(entry.mime || "image/png") : "text/plain",
-    historyIndex: historyIndex,
     pinned: !!entry.pinned
   }
 }
@@ -271,10 +302,11 @@ function displaySections(history, query, limitPerSection) {
   var recent = []
 
   for (var i = 0; i < values.length; i++) {
-    var entry = cappedEntry(normalizeEntry(values[i]))
+    var fullEntry = normalizeEntry(values[i])
+    var entry = cappedEntry(fullEntry)
     if (!entry) continue
-    if (needle && searchableText(entry).toLowerCase().indexOf(needle) < 0) continue
-    var row = buildRow(entry, i)
+    if (needle && searchableText(fullEntry).toLowerCase().indexOf(needle) < 0) continue
+    var row = buildRow(entry, undefined, fullEntry)
     if (entry.pinned) {
       if (pinned.length < max) pinned.push(row)
     } else {
@@ -318,8 +350,8 @@ if (typeof module !== "undefined") {
     parseHistory: parseHistory,
     addEntry: addEntry,
     capUnpinned: capUnpinned,
-    togglePinned: togglePinned,
-    removeEntryAt: removeEntryAt,
+    togglePinnedById: togglePinnedById,
+    removeById: removeById,
     clearUnpinned: clearUnpinned,
     parseEntryJson: parseEntryJson,
     searchableText: searchableText,

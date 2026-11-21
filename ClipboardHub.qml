@@ -29,10 +29,16 @@ Item {
   property bool emojiCursorActive: false
   property var emojis: []
 
-  property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/clipboard-hub"
+  // One state location for QML and all helper scripts.
+  property string stateHome: {
+    var xdg = String(Quickshell.env("XDG_STATE_HOME") || "")
+    return xdg.length > 0 ? xdg : String(Quickshell.env("HOME") || "") + "/.local/state"
+  }
+  property string stateDir: stateHome + "/omarchy/clipboard-hub"
   property string historyPath: stateDir + "/history.json"
   property string imageDir: stateDir + "/images"
   property string pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/adii9669.clipboard-hub"
+  property string maintainScript: pluginDir + "/maintain-state.sh"
   property string captureScript: pluginDir + "/capture.sh"
   property string pasteTextScript: pluginDir + "/paste-text.sh"
   property string emojiInsertScript: pluginDir + "/insert-emoji.sh"
@@ -134,6 +140,8 @@ Item {
 
   function saveHistory() {
     historyFile.setText(JSON.stringify(root.history, null, 2) + "\n")
+    // Enforce private permissions and collect images no longer in history.
+    Quickshell.execDetached(["bash", root.maintainScript])
   }
 
   function addClipboardEntry(entry) {
@@ -155,12 +163,13 @@ Item {
       var row = rows[i]
       clipboardModel.append({
         entryType: row.entryType,
+        entryId: String(row.entryId || ""),
         fullText: row.fullText,
+        pasteText: String(row.pasteText || ""),
         previewText: row.previewText,
         previewImage: row.previewImage ? Util.fileUrl(row.previewImage) : "",
         path: row.path,
         mime: row.mime,
-        historyIndex: row.historyIndex,
         pinned: !!row.pinned,
         section: String(row.section || "recent")
       })
@@ -257,13 +266,29 @@ Item {
     root.openClipboardRow(row)
   }
 
+  function runPasteText(row, copyOnly) {
+    if (!row) return
+    var text = String(row.pasteText || "")
+    if (!text) return
+
+    // Send the exact selected entry over stdin. Nothing is looked up by index
+    // or re-read from history.json, so a reorder or pending write cannot make
+    // this paste a different item.
+    pasteProc.pendingText = text
+    pasteProc.command = [root.pasteTextScript]
+    if (copyOnly) pasteProc.command.push("--copy-only")
+    else pasteProc.command.push("--shift-insert")
+    pasteProc.running = false
+    pasteProc.running = true
+  }
+
   function applyClipboardRow(row) {
     if (!row) return
     root.opened = false
     if (row.entryType === "image") {
       Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-paste-file", row.mime, row.path])
     } else {
-      Quickshell.execDetached([root.pasteTextScript, "--shift-insert", "--history-index", String(row.historyIndex)])
+      root.runPasteText(row, false)
     }
   }
 
@@ -273,7 +298,7 @@ Item {
     if (row.entryType === "image") {
       Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-paste-file", "--copy-only", row.mime, row.path])
     } else {
-      Quickshell.execDetached([root.pasteTextScript, "--copy-only", "--history-index", String(row.historyIndex)])
+      root.runPasteText(row, true)
     }
   }
 
@@ -290,14 +315,14 @@ Item {
       var text = String(row.fullText || "")
       if (!text) return
       // let omarchy-clipboard-open logic be approximated: write temp then open editor
-      Quickshell.execDetached(["bash", "-lc", "set -euo pipefail; d=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-hub/open\"; mkdir -p \"$d\"; f=$(mktemp --tmpdir=\"$d\" clipboard.XXXXXX.txt); printf '%s' \"$1\" > \"$f\"; exec omarchy-launch-editor \"$f\"", "bash", text])
+      Quickshell.execDetached(["bash", "-lc", "set -euo pipefail; d=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-hub/open\"; mkdir -p \"$d\"; chmod 700 \"$d\"; f=$(mktemp --tmpdir=\"$d\" clipboard.XXXXXX.txt); printf '%s' \"$1\" > \"$f\"; exec omarchy-launch-editor \"$f\"", "bash", text])
     }
   }
 
   function togglePinAtDisplayIndex(index) {
     if (index < 0 || index >= clipboardModel.count) return
     var row = clipboardModel.get(index)
-    root.history = ClipboardModel.togglePinned(root.history, row.historyIndex)
+    root.history = ClipboardModel.togglePinnedById(root.history, row.entryId)
     root.saveHistory()
     root.disarmPointer()
     root.rebuildClipboardDisplay()
@@ -306,8 +331,9 @@ Item {
   function removeAtDisplayIndex(index) {
     if (index < 0 || index >= clipboardModel.count) return
     var row = clipboardModel.get(index)
-    root.history = ClipboardModel.removeEntryAt(root.history, row.historyIndex)
+    root.history = ClipboardModel.removeById(root.history, row.entryId)
     root.saveHistory()
+    Quickshell.execDetached(["bash", root.maintainScript, "--now"])
     root.disarmPointer()
     if (clipboardModel.count <= 1) root.selectedIndex = 0
     else if (root.selectedIndex >= clipboardModel.count - 1) root.selectedIndex = Math.max(0, clipboardModel.count - 2)
@@ -329,6 +355,7 @@ Item {
   function confirmClearUnpinned() {
     root.history = ClipboardModel.clearUnpinned(root.history)
     root.saveHistory()
+    Quickshell.execDetached(["bash", root.maintainScript, "--now"])
     root.clearConfirmOpen = false
     root.selectedIndex = 0
     root.cursorActive = clipboardModel.count > 0
@@ -392,7 +419,10 @@ Item {
     Quickshell.execDetached([root.emojiInsertScript, row.emoji])
   }
 
-  Component.onCompleted: initProc.running = true
+  Component.onCompleted: {
+    Quickshell.execDetached(["bash", root.maintainScript])
+    initProc.running = true
+  }
 
   ListModel { id: clipboardModel }
   ListModel { id: emojiModel }
@@ -413,6 +443,19 @@ Item {
   FileView {
     path: root.omarchyPath + "/shell/plugins/emojis/emojis.json"
     onLoaded: root.loadEmojis(text())
+  }
+
+  // The selected entry's exact text is written to stdin, terminated by NUL.
+  // paste-text.sh exits as soon as it reads that delimiter, so there is no
+  // dependence on closing the write channel or on a mutable history index.
+  Process {
+    id: pasteProc
+    stdinEnabled: true
+    property string pendingText: ""
+    onStarted: {
+      write(pendingText + "\u0000")
+      pendingText = ""
+    }
   }
 
   Process {
@@ -786,7 +829,6 @@ Item {
                       required property string previewImage
                       required property string path
                       required property string mime
-                      required property int historyIndex
                       required property bool pinned
                       required property string section
 

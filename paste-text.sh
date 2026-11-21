@@ -1,13 +1,17 @@
 #!/bin/bash
 
-# Copy a text entry from Clipboard Hub history and optionally trigger paste.
-# Usage: paste-text.sh [--shift-insert] [--copy-only] --history-index <index>
+# Copy one exact text entry from Clipboard Hub and optionally trigger paste.
+#
+# The selected text is passed over stdin and terminated by a NUL byte, so the
+# action is bound to the item the user clicked rather than to a mutable index
+# in history.json. No clipboard content is re-read from disk here.
+#
+# Usage: paste-text.sh [--shift-insert] [--copy-only] < text-with-NUL-terminator
 
 set -euo pipefail
 
 use_shift_insert=false
 copy_only=false
-history_index=""
 
 while (( $# > 0 )); do
   case "$1" in
@@ -19,24 +23,18 @@ while (( $# > 0 )); do
       copy_only=true
       shift
       ;;
-    --history-index)
-      history_index="${2:-}"
-      shift 2
-      ;;
     *)
-      echo "Usage: paste-text.sh [--shift-insert] [--copy-only] --history-index <index>" >&2
+      echo "Usage: paste-text.sh [--shift-insert] [--copy-only]" >&2
       exit 1
       ;;
   esac
 done
 
-[[ $history_index =~ ^[0-9]+$ ]] || exit 1
+# QML writes the selected entry followed by a single NUL delimiter.
+IFS= read -r -d '' text || exit 1
+[[ -n $text ]] || exit 1
 
-history_path="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-hub/history.json"
-[[ -r $history_path ]] || exit 1
-
-jq -e --argjson index "$history_index" '.[$index].type == "text" and (.[$index].text | type == "string")' "$history_path" >/dev/null || exit 1
-jq -j --argjson index "$history_index" '.[$index].text' "$history_path" | wl-copy
+printf '%s' "$text" | wl-copy
 
 if [[ $copy_only == true ]]; then
   exit 0
