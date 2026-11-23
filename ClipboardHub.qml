@@ -139,9 +139,9 @@ Item {
   }
 
   function saveHistory() {
+    // Cleanup runs from historyFile.onSaved: setText() writes asynchronously,
+    // so collecting here can still see the previous on-disk history.
     historyFile.setText(JSON.stringify(root.history, null, 2) + "\n")
-    // Enforce private permissions and collect images no longer in history.
-    Quickshell.execDetached(["bash", root.maintainScript])
   }
 
   function addClipboardEntry(entry) {
@@ -333,7 +333,6 @@ Item {
     var row = clipboardModel.get(index)
     root.history = ClipboardModel.removeById(root.history, row.entryId)
     root.saveHistory()
-    Quickshell.execDetached(["bash", root.maintainScript, "--now"])
     root.disarmPointer()
     if (clipboardModel.count <= 1) root.selectedIndex = 0
     else if (root.selectedIndex >= clipboardModel.count - 1) root.selectedIndex = Math.max(0, clipboardModel.count - 2)
@@ -355,7 +354,6 @@ Item {
   function confirmClearUnpinned() {
     root.history = ClipboardModel.clearUnpinned(root.history)
     root.saveHistory()
-    Quickshell.execDetached(["bash", root.maintainScript, "--now"])
     root.clearConfirmOpen = false
     root.selectedIndex = 0
     root.cursorActive = clipboardModel.count > 0
@@ -438,6 +436,14 @@ Item {
     onLoaded: root.loadHistory(text())
     onLoadFailed: root.loadHistory("[]")
     onFileChanged: reload()
+    // Only collect images once the new history is actually on disk. The
+    // helper's reference timestamp also protects captures written after this
+    // point but not yet added to history.
+    onSaved: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+    onSaveFailed: {
+      // Do not collect: the old file may still be the only record of images
+      // that the unsaved in-memory history just dropped.
+    }
   }
 
   FileView {
