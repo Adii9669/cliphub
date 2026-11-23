@@ -22,6 +22,6 @@ BarWidget {
     text: "󰅌"
     fontFamily: "JetBrainsMono Nerd Font"
     fontSize: Style.font.iconLarge
-    onPressed: function(mouseButton) { root.openMenu() }
+    onPressed: function() { root.openMenu() }
   }
 }

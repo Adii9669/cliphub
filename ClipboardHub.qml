@@ -11,7 +11,7 @@ import "EmojiSearch.js" as EmojiSearch
 Item {
   id: root
 
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
+  property string omarchyPath: String(Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy")
   property bool opened: false
   property string activeTab: "clipboard" // "clipboard" | "emoji"
 
@@ -37,7 +37,14 @@ Item {
   property string stateDir: stateHome + "/omarchy/clipboard-hub"
   property string historyPath: stateDir + "/history.json"
   property string imageDir: stateDir + "/images"
-  property string pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/adii9669.clipboard-hub"
+  // Resolve helpers relative to this QML file so XDG_CONFIG_HOME is honoured.
+  property string pluginDir: {
+    var u = Qt.resolvedUrl(".").toString()
+    if (u.indexOf("file://") === 0) u = u.substring(7)
+    u = u.replace(/\/+$/, "")
+    try { u = decodeURIComponent(u) } catch (e) {}
+    return u
+  }
   property string maintainScript: pluginDir + "/maintain-state.sh"
   property string captureScript: pluginDir + "/capture.sh"
   property string pasteTextScript: pluginDir + "/paste-text.sh"
@@ -111,7 +118,7 @@ Item {
   onCompactLayoutChanged: if (!compactLayout) compactPreview = false
 
   function close() {
-    root.cancelClearUnpinned()
+    if (root.clearConfirmOpen) root.cancelClearUnpinned()
     root.opened = false
   }
 
@@ -165,7 +172,6 @@ Item {
         entryType: row.entryType,
         entryId: String(row.entryId || ""),
         fullText: row.fullText,
-        pasteText: String(row.pasteText || ""),
         previewText: row.previewText,
         previewImage: row.previewImage ? Util.fileUrl(row.previewImage) : "",
         path: row.path,
@@ -187,7 +193,7 @@ Item {
     var out = EmojiSearch.filterEmojis(root.emojis, root.emojiFilterText, 1000)
     emojiModel.clear()
     for (var i = 0; i < out.length; i++) {
-      emojiModel.append({ emoji: out[i].e, index: i })
+      emojiModel.append({ emoji: out[i].e })
     }
     if (emojiModel.count === 0) emojiSelectedIndex = 0
     else if (emojiSelectedIndex >= emojiModel.count) emojiSelectedIndex = emojiModel.count - 1
@@ -266,27 +272,37 @@ Item {
     root.openClipboardRow(row)
   }
 
+  // Image paths in history.json are data, not authority. Never hand an
+  // arbitrary local path to an external command.
+  function safeImagePath(path) {
+    var value = String(path || "")
+    var prefix = root.imageDir + "/"
+    return value.indexOf(prefix) === 0 ? value : ""
+  }
+
   function runPasteText(row, copyOnly) {
     if (!row) return
-    var text = String(row.pasteText || "")
+    // Resolve full text by stable id at activation time. The display model
+    // keeps only capped previews, so rebuilding it must not copy megabytes.
+    var entry = ClipboardModel.entryById(root.history, row.entryId)
+    var text = entry && entry.type === "text" ? String(entry.text || "") : ""
     if (!text) return
 
-    // Send the exact selected entry over stdin. Nothing is looked up by index
-    // or re-read from history.json, so a reorder or pending write cannot make
-    // this paste a different item.
-    pasteProc.pendingText = text
-    pasteProc.command = [root.pasteTextScript]
-    if (copyOnly) pasteProc.command.push("--copy-only")
-    else pasteProc.command.push("--shift-insert")
-    pasteProc.running = false
-    pasteProc.running = true
+    // A fresh Process per action. A single shared Process has to be terminated
+    // and restarted between activations, which can overwrite its pending
+    // payload before onStarted fires and paste the wrong entry.
+    var worker = pasteProcess.createObject(root, { payload: text })
+    if (!worker) return
+    worker.command = [root.pasteTextScript, copyOnly ? "--copy-only" : "--shift-insert"]
+    worker.running = true
   }
 
   function applyClipboardRow(row) {
     if (!row) return
     root.opened = false
     if (row.entryType === "image") {
-      Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-paste-file", row.mime, row.path])
+      var path = root.safeImagePath(row.path)
+      if (path) Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-paste-file", row.mime, path])
     } else {
       root.runPasteText(row, false)
     }
@@ -296,7 +312,8 @@ Item {
     if (!row) return
     root.opened = false
     if (row.entryType === "image") {
-      Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-paste-file", "--copy-only", row.mime, row.path])
+      var path = root.safeImagePath(row.path)
+      if (path) Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-clipboard-paste-file", "--copy-only", row.mime, path])
     } else {
       root.runPasteText(row, true)
     }
@@ -305,27 +322,42 @@ Item {
   function openClipboardRow(row) {
     if (!row) return
     root.opened = false
-    // Reuse system helper for text/file/image open semantics by synthesizing temp handling when possible.
-    // For history-backed behavior we fall back to writing temp for text-like rows and using omasnap/editor/browser via a helper script would be overkill;
-    // easiest: copy-only + open is not needed; use existing helper by pointing to a temp json index is not available.
-    // Instead handle common cases inline-ish via commands.
-    if (row.entryType === "image" && row.path) {
-      Quickshell.execDetached([root.omarchyPath + "/bin/omasnap", "--notify", row.path])
-    } else {
-      var text = String(row.fullText || "")
-      if (!text) return
-      // let omarchy-clipboard-open logic be approximated: write temp then open editor
-      Quickshell.execDetached(["bash", "-lc", "set -euo pipefail; d=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-hub/open\"; mkdir -p \"$d\"; chmod 700 \"$d\"; f=$(mktemp --tmpdir=\"$d\" clipboard.XXXXXX.txt); printf '%s' \"$1\" > \"$f\"; exec omarchy-launch-editor \"$f\"", "bash", text])
+    if (row.entryType === "image") {
+      var path = root.safeImagePath(row.path)
+      if (path) Quickshell.execDetached([root.omarchyPath + "/bin/omasnap", "--notify", path])
+      return
     }
+
+    var entry = ClipboardModel.entryById(root.history, row.entryId)
+    var text = entry && entry.type === "text" ? String(entry.text || "") : ""
+    if (!text) return
+
+    // Own the temp file for the editor's lifetime only. The old `exec` kept
+    // the file forever, leaking clipboard content into the state directory.
+    Quickshell.execDetached(["bash", "-c",
+      "set -euo pipefail; d=\"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-hub/open\"; " +
+      "mkdir -p \"$d\"; chmod 700 \"$d\"; f=$(mktemp --tmpdir=\"$d\" clipboard.XXXXXX.txt); " +
+      "trap 'rm -f -- \"$f\"' EXIT; printf '%s' \"$1\" > \"$f\"; omarchy-launch-editor \"$f\"",
+      "bash", text])
   }
 
   function togglePinAtDisplayIndex(index) {
     if (index < 0 || index >= clipboardModel.count) return
     var row = clipboardModel.get(index)
-    root.history = ClipboardModel.togglePinnedById(root.history, row.entryId)
+    var id = String(row.entryId || "")
+    root.history = ClipboardModel.togglePinnedById(root.history, id)
     root.saveHistory()
     root.disarmPointer()
     root.rebuildClipboardDisplay()
+    // Pinning moves the row between sections; follow the same entry instead
+    // of leaving the cursor on whatever took over its old index.
+    for (var i = 0; i < clipboardModel.count; i++) {
+      if (String(clipboardModel.get(i).entryId || "") === id) {
+        root.selectedIndex = i
+        Qt.callLater(function() { resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain) })
+        break
+      }
+    }
   }
 
   function removeAtDisplayIndex(index) {
@@ -348,7 +380,7 @@ Item {
   function cancelClearUnpinned() {
     root.clearConfirmOpen = false
     root.disarmPointer()
-    Qt.callLater(function() { filterInput.forceActiveFocus() })
+    Qt.callLater(function() { if (root.opened) filterInput.forceActiveFocus() })
   }
 
   function confirmClearUnpinned() {
@@ -434,11 +466,15 @@ Item {
     atomicWrites: true
     printErrors: false
     onLoaded: root.loadHistory(text())
-    onLoadFailed: root.loadHistory("[]")
-    onFileChanged: reload()
+    // Keep the last good history on a read error. Replacing it with [] here
+    // would let the next save overwrite the real file with an empty array.
+    // On a genuine first run the in-memory history is already [].
+    onLoadFailed: {}
+    // GC touches the state directory, so a raw watcher fires several times per
+    // save. Debounce to one reload of actual content.
+    onFileChanged: reloadDebounce.restart()
     // Only collect images once the new history is actually on disk. The
-    // helper's reference timestamp also protects captures written after this
-    // point but not yet added to history.
+    // helper's grace window also protects captures staged after this point.
     onSaved: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
     onSaveFailed: {
       // Do not collect: the old file may still be the only record of images
@@ -446,21 +482,31 @@ Item {
     }
   }
 
+  Timer {
+    id: reloadDebounce
+    interval: 150
+    repeat: false
+    onTriggered: historyFile.reload()
+  }
+
   FileView {
     path: root.omarchyPath + "/shell/plugins/emojis/emojis.json"
     onLoaded: root.loadEmojis(text())
   }
 
-  // The selected entry's exact text is written to stdin, terminated by NUL.
-  // paste-text.sh exits as soon as it reads that delimiter, so there is no
-  // dependence on closing the write channel or on a mutable history index.
-  Process {
-    id: pasteProc
-    stdinEnabled: true
-    property string pendingText: ""
-    onStarted: {
-      write(pendingText + "\u0000")
-      pendingText = ""
+  // One short-lived Process per paste action. A single shared Process has to
+  // be terminated/restarted between activations, which can overwrite the
+  // pending payload before onStarted writes it.
+  Component {
+    id: pasteProcess
+    Process {
+      id: worker
+      stdinEnabled: true
+      property string payload: ""
+      // The selected entry's exact text goes to stdin, terminated by NUL.
+      // paste-text.sh exits at that delimiter, so no close/index dependency.
+      onStarted: write(payload + "\u0000")
+      onExited: worker.destroy()
     }
   }
 
@@ -831,12 +877,8 @@ Item {
                       required property int index
                       required property string entryType
                       required property string previewText
-                      required property string fullText
                       required property string previewImage
-                      required property string path
-                      required property string mime
                       required property bool pinned
-                      required property string section
 
                       readonly property bool hasCursor: root.cursorActive && index === root.selectedIndex
                       readonly property bool showPinnedHeader: {
@@ -1000,7 +1042,7 @@ Item {
                             onClicked: {
                               root.cursorActive = true
                               root.selectedIndex = rowItem.index
-                              root.copyClipboardIndex(rowItem.index)
+                              root.activateClipboardIndex(rowItem.index)
                             }
                           }
                         }
@@ -1085,6 +1127,7 @@ Item {
                 visible: clipboardModel.count === 0
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "󰅌"
                   color: root.selectedText
                   opacity: 0.8
@@ -1161,6 +1204,7 @@ Item {
                 visible: emojiModel.count === 0
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "󰞅"
                   color: root.selectedText
                   opacity: 0.8

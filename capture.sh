@@ -20,9 +20,19 @@ MAX_TEXT_BYTES=$((1024 * 1024))
 MAX_IMAGE_BYTES=$((10 * 1024 * 1024))
 MAX_IMAGE_TOTAL=$((100 * 1024 * 1024))
 
-types=$(timeout 2s wl-paste --list-types 2>/dev/null || true)
-
-if [[ ${CLIPBOARD_STATE:-} == "sensitive" ]] || grep -qx 'x-kde-passwordManagerHint' <<<"$types"; then
+# In watch mode wl-paste sets CLIPBOARD_STATE for the payload itself, so a
+# second --list-types connection would race a clipboard change. Only probe
+# types when we have to snapshot the selection ourselves.
+types=""
+if [[ ${CLIPBOARD_STATE:-} == "sensitive" ]]; then
+  exit 0
+elif [[ -z ${1:-} ]]; then
+  types=$(timeout 2s wl-paste --list-types 2>/dev/null || true)
+  if grep -qx 'x-kde-passwordManagerHint' <<<"$types"; then
+    exit 0
+  fi
+elif [[ ${CLIPBOARD_STATE:-data} != "data" ]]; then
+  # nil/clear/unknown states carry no payload worth persisting.
   exit 0
 fi
 
@@ -33,7 +43,11 @@ trap 'rm -f -- "$tmp"' EXIT
 read_copy() {
   local cap=$1
   shift
-  timeout 2s "$@" 2>/dev/null | head -c "$((cap + 1))" >"$tmp" || true
+  # pipefail makes a timeout (124) reject the entry. Without this, a slow or
+  # hung clipboard owner silently becomes a truncated permanent history item.
+  if ! timeout 2s "$@" 2>/dev/null | head -c "$((cap + 1))" >"$tmp"; then
+    return 1
+  fi
   [[ -s $tmp ]] || return 1
   (( $(wc -c < "$tmp") <= cap ))
 }
@@ -44,36 +58,40 @@ image_dir_used() {
 
 emit_image() {
   local mime="$1"
-  local ext hash file size used
+  local ext hash file used
   shift
 
   ext=${mime#image/}
   [[ $ext == jpeg ]] && ext=jpg
 
-  tmp=$(mktemp --tmpdir="$IMAGE_DIR" clipboard.XXXXXX) || return 0
+  # Distinct prefix: the GC must never unlink a file still being staged.
+  tmp=$(mktemp --tmpdir="$IMAGE_DIR" .clipboard-tmp.XXXXXX) || return 0
   read_copy "$MAX_IMAGE_BYTES" "$@" || return 0
 
-  size=$(wc -c < "$tmp")
+  # du already counts the staged temp, which becomes the stored image via mv,
+  # so compare the directory total directly instead of adding size again.
   used=$(image_dir_used)
   used=${used:-0}
-  if (( used + size > MAX_IMAGE_TOTAL )); then
+  if (( used > MAX_IMAGE_TOTAL )); then
     bash "$maintain_script" >/dev/null 2>&1 || true
     used=$(image_dir_used)
     used=${used:-0}
-    if (( used + size > MAX_IMAGE_TOTAL )); then
+    if (( used > MAX_IMAGE_TOTAL )); then
       rm -f -- "$tmp"
       tmp=
       return 0
     fi
   fi
 
-  hash=$(sha256sum "$tmp" | awk '{print $1}')
+  if ! hash=$(sha256sum "$tmp" | awk '{print $1}') || [[ -z $hash ]]; then
+    return 0
+  fi
   file="$IMAGE_DIR/$hash.$ext"
   if [[ -e $file ]]; then
     rm -f -- "$tmp"
     tmp=
   else
-    mv "$tmp" "$file"
+    mv -- "$tmp" "$file" || return 0
     tmp=
   fi
 
@@ -82,7 +100,7 @@ emit_image() {
 }
 
 emit_text() {
-  tmp=$(mktemp --tmpdir="$STATE_DIR" clipboard.XXXXXX) || return 0
+  tmp=$(mktemp --tmpdir="$STATE_DIR" .clipboard-tmp.XXXXXX) || return 0
   read_copy "$MAX_TEXT_BYTES" "$@" || return 0
 
   perl -MEncode=decode,FB_CROAK,LEAVE_SRC -MJSON::PP=encode_json -0777 -e '

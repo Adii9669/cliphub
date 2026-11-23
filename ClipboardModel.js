@@ -1,4 +1,6 @@
 var displayTextLimit = 8192
+// Bounds pinned history too, so pinning cannot grow state without limit.
+var pinnedLimit = 100
 
 // Stable, content-derived IDs let row actions target the exact item the user
 // selected, even if the underlying history is reordered before the click.
@@ -34,7 +36,9 @@ function normalizeEntry(value) {
     var text = String(value.text || "")
     if (text.trim().length === 0) return null
     var t = { type: "text", text: text, pinned: pinned }
-    t.id = String(value.id || "") || makeId(t)
+    // Always derive the id from content. A stale or tampered id in history
+    // must not let one row action match several unrelated entries.
+    t.id = makeId(t)
     if (value.updatedAt !== undefined && value.updatedAt !== null) t.updatedAt = String(value.updatedAt)
     return t
   }
@@ -48,7 +52,7 @@ function normalizeEntry(value) {
       mime: String(value.mime || "image/png"),
       pinned: pinned
     }
-    img.id = String(value.id || "") || makeId(img)
+    img.id = makeId(img)
     if (value.capturedAt !== undefined && value.capturedAt !== null)
       img.capturedAt = String(value.capturedAt)
     if (value.updatedAt !== undefined && value.updatedAt !== null)
@@ -134,13 +138,18 @@ function capUnpinned(history, unpinnedLimit) {
   var limit = unpinnedLimit === undefined || unpinnedLimit === null ? 200 : Number(unpinnedLimit)
   if (isNaN(limit)) limit = 200
   limit = Math.max(0, limit)
+  var maxPinned = pinnedLimit
   var out = []
   var unpinnedSeen = 0
+  var pinnedSeen = 0
   for (var i = 0; i < values.length; i++) {
     var e = normalizeEntry(values[i])
     if (!e) continue
     if (e.pinned) {
-      out.push(e)
+      if (pinnedSeen < maxPinned) {
+        out.push(e)
+        pinnedSeen++
+      }
     } else {
       if (unpinnedSeen < limit) {
         out.push(e)
@@ -162,7 +171,8 @@ function togglePinnedById(history, id) {
     if (String(e.id || makeId(e)) === wanted) e.pinned = !e.pinned
     out.push(e)
   }
-  return out
+  // Pinning is a write too: enforce the same limits here, not only on add.
+  return capUnpinned(out)
 }
 
 function removeById(history, id) {
@@ -215,8 +225,12 @@ function filePaths(entry) {
   var lines = String(entry.text || "").split(/\r?\n/)
   var paths = []
   for (var i = 0; i < lines.length; i++) {
+    if (!lines[i].trim()) continue
     var path = decodeFileUri(lines[i])
-    if (path) paths.push(path)
+    // A single file:// URL inside prose is still text. Only classify as a
+    // file entry when every non-empty line is a file URI.
+    if (!path) return []
+    paths.push(path)
   }
   return paths
 }
@@ -270,8 +284,7 @@ function cappedEntry(entry) {
   }
 }
 
-function buildRow(entry, tr, fullEntry) {
-  var t = typeof tr === "function" ? tr : function(key, fallback) { return fallback || key }
+function buildRow(entry, fullEntry) {
   var paths = filePaths(entry)
   var isFile = paths.length > 0
   var isImage = entry.type === "image"
@@ -281,8 +294,6 @@ function buildRow(entry, tr, fullEntry) {
     entryType: isFile ? "file" : entry.type,
     entryId: String(source.id || makeId(source)),
     fullText: isImage ? "" : fullText(entry),
-    // Paste/copy use the uncapped source text, never the shortened preview.
-    pasteText: isImage ? "" : String(source.text || ""),
     previewText: previewText(entry),
     previewImage: previewPath,
     path: isImage ? String(entry.path || "") : (isFile && paths.length === 1 ? paths[0] : ""),
@@ -306,7 +317,7 @@ function displaySections(history, query, limitPerSection) {
     var entry = cappedEntry(fullEntry)
     if (!entry) continue
     if (needle && searchableText(fullEntry).toLowerCase().indexOf(needle) < 0) continue
-    var row = buildRow(entry, undefined, fullEntry)
+    var row = buildRow(entry, fullEntry)
     if (entry.pinned) {
       if (pinned.length < max) pinned.push(row)
     } else {
@@ -333,14 +344,17 @@ function flatDisplayRows(history, query, limitPerSection) {
   return rows
 }
 
-function referencedImagePaths(history) {
+// Look up the full, uncapped entry at activation time. The display model only
+// keeps capped previews, so rebuilding it must not copy megabytes of text.
+function entryById(history, id) {
   var values = Array.isArray(history) ? history : []
-  var set = {}
+  var wanted = String(id || "")
+  if (!wanted) return null
   for (var i = 0; i < values.length; i++) {
     var e = normalizeEntry(values[i])
-    if (e && e.type === "image" && e.path) set[String(e.path)] = true
+    if (e && String(e.id || makeId(e)) === wanted) return e
   }
-  return set
+  return null
 }
 
 if (typeof module !== "undefined") {
@@ -362,7 +376,7 @@ if (typeof module !== "undefined") {
     fullText: fullText,
     displaySections: displaySections,
     flatDisplayRows: flatDisplayRows,
-    referencedImagePaths: referencedImagePaths,
+    entryById: entryById,
     pinnedCount: pinnedCount,
     unpinnedCount: unpinnedCount
   }

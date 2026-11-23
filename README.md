@@ -10,7 +10,7 @@ Clipboard history supports pinned items, per-item delete, clear-all that preserv
 - Clipboard: pinned section at the top, pin/unpin, copy, delete, and `Clear all` (unpinned only)
 - Image clipboard entries are stored and previewed as thumbnails
 - Click any clipboard row to paste that text; `Shift+Enter` copies only
-- Emoji search with keyboard navigation and insertion via standard `Ctrl+V` (works in browsers and terminals)
+- Emoji search with keyboard navigation and insertion via standard `Ctrl+V` (works in browsers and GUI apps; terminals that bind `Ctrl+V` to quoted-insert need `Ctrl+Shift+V` instead)
 - Compact, theme-aware overlay; no changes to `/usr/share/omarchy/`
 - Responsive: the card shrinks to fit the screen, with a narrow-screen layout below ~560px
 
@@ -26,6 +26,7 @@ Clipboard history supports pinned items, per-item delete, clear-all that preserv
 
 - Omarchy Quattro shell (Quickshell) with plugin support
 - `wl-clipboard` (`wl-paste`, `wl-copy`), `jq`, `perl` (with `Encode` and `JSON::PP`), `coreutils`, `bash`
+- `setpriv` (util-linux) and `pkill` (procps-ng) for the clipboard watchers, plus `omarchy-language` for localized capture timestamps
 - Optional: `wtype` for synthetic paste, `omarchy-launch-editor` for the "open in editor" action
 - A Nerd Font (JetBrains Mono Nerd Font is used for the icons)
 
@@ -74,8 +75,11 @@ Capture limits are enforced before storage:
 - text entries: 1 MiB each
 - images: 10 MiB each
 - total image storage: 100 MiB
+- history: 200 unpinned + 100 pinned entries
 
-Deleting an entry or clearing unpinned entries removes plugin-owned image files that are no longer referenced by any remaining entry.
+Deleting an entry or clearing unpinned entries removes plugin-owned image files that are no longer referenced by any remaining entry. Cleanup refuses to run if `history.json` is missing or invalid, and keeps files created in the last few seconds so a concurrent capture cannot be deleted before its entry is saved. "Open in editor" temp files are removed when the editor exits, with a daily sweep as a crash backstop.
+
+See [FIXES.md](FIXES.md) for the review findings and the reasoning behind these safeguards.
 
 ## Remove
 
