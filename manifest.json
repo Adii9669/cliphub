@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "adii9669.clipboard-hub",
   "name": "Clipboard Hub",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Adii9669",
   "description": "Unified Omarchy clipboard history and emoji picker with pins, delete, clear-all, image previews, and a single bar button",
   "license": "MIT",

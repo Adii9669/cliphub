@@ -23,6 +23,16 @@ Item {
   property var history: []
   property int unpinnedLimit: 200
 
+  // Keep the QML follow-up timer in step with the shell GC grace windows.
+  property int gcNowGraceSeconds: {
+    var v = Number(Quickshell.env("CLIPBOARD_HUB_GC_GRACE_SECONDS"))
+    return v > 0 ? v : 5
+  }
+  property int gcStartupGraceSeconds: {
+    var v = Number(Quickshell.env("CLIPBOARD_HUB_GC_GRACE_SECONDS"))
+    return v > 0 ? v : 30
+  }
+
   // emoji state
   property string emojiFilterText: ""
   property int emojiSelectedIndex: 0
@@ -149,6 +159,19 @@ Item {
     // Cleanup runs from historyFile.onSaved: setText() writes asynchronously,
     // so collecting here can still see the previous on-disk history.
     historyFile.setText(JSON.stringify(root.history, null, 2) + "\n")
+  }
+
+  // The immediate collector protects files inside its grace window, but an
+  // image deleted during that window is still on disk afterwards. Schedule a
+  // second pass just after the window closes so it is not left behind until
+  // the next unrelated clipboard event or restart.
+  function scheduleGcFollowup(startup) {
+    var timer = startup ? gcStartupFollowup : gcFollowupTimer
+    var grace = startup ? root.gcStartupGraceSeconds : root.gcNowGraceSeconds
+    timer.interval = grace * 1000 + 1000
+    // Do not push the deadline out on every save: continuous clipboard
+    // activity must not postpone the pass forever.
+    if (!timer.running) timer.start()
   }
 
   function addClipboardEntry(entry) {
@@ -451,6 +474,7 @@ Item {
 
   Component.onCompleted: {
     Quickshell.execDetached(["bash", root.maintainScript])
+    root.scheduleGcFollowup(true)
     initProc.running = true
   }
 
@@ -474,12 +498,30 @@ Item {
     // save. Debounce to one reload of actual content.
     onFileChanged: reloadDebounce.restart()
     // Only collect images once the new history is actually on disk. The
-    // helper's grace window also protects captures staged after this point.
-    onSaved: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+    // helper's grace window protects captures staged after this point; the
+    // follow-up pass cleans anything whose window has since closed.
+    onSaved: {
+      Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+      root.scheduleGcFollowup(false)
+    }
     onSaveFailed: {
       // Do not collect: the old file may still be the only record of images
       // that the unsaved in-memory history just dropped.
     }
+  }
+
+  Timer {
+    id: gcFollowupTimer
+    interval: 6000
+    repeat: false
+    onTriggered: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+  }
+
+  Timer {
+    id: gcStartupFollowup
+    interval: 31000
+    repeat: false
+    onTriggered: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
   }
 
   Timer {

@@ -3,7 +3,7 @@
 This document records the issues found during a full review of the plugin, what
 each one could cause, and the solution chosen for it. It is kept in the repo as
 a learning record so the reasoning survives after the code has moved on.
-Applies to v1.0.2.
+Applies to v1.0.3.
 
 Scope: the review covered `ClipboardHub.qml`, `ClipboardModel.js`,
 `EmojiSearch.js`, `BarWidget.qml`, `capture.sh`, `paste-text.sh`,
@@ -102,6 +102,9 @@ saves cannot run two collectors concurrently.
 
 **Verification:** A file created seconds ago and an in-progress temp file
 survive a `--now` run, while a 10-minute-old orphan is removed.
+
+**Follow-up:** this fix introduced a retention gap of its own — see the
+addendum at the end of this document.
 
 ---
 
@@ -450,6 +453,48 @@ the deferred focus call with `if (root.opened)`.
 - Standalone Quickshell probes for `onSaved` ordering, `Qt.resolvedUrl(".")`,
   and fresh-`Process` stdin delivery.
 - Shell journal check after live plugin reload: no QML errors.
+
+## Addendum — grace window could strand fresh deletions (v1.0.3)
+
+**Status:** this was a real regression in the v1.0.2 fix above, caught by a
+follow-up review.
+
+**The issue:** the 5-second grace in `maintain-state.sh --now` protects a file
+created after `now - 5s`. That is exactly what an in-flight capture needs, but
+it also protects an image that was captured *and then deleted* inside those five
+seconds. `onSaved` ran the collector once, immediately, and never again. Once
+the grace window closed, nothing re-ran GC — so the deleted screenshot stayed
+on disk until the next clipboard event or a shell restart.
+
+**What it can cause:** a "delete" action that appears to work in the UI but
+leaves the screenshot on disk for an unbounded time. That is the same class of
+privacy finding as the original Medium issue, just with a different trigger.
+
+**Why the first fix was incomplete:** a time-based grace cannot tell the two
+cases apart. It protects by *age*, but the distinction is *lifecycle*: "staged
+but not yet published" versus "published, then removed". We chose to keep the
+grace (it is simple and safe for the capture race) and make sure the window is
+always followed by another collection pass.
+
+**The fix chosen:**
+- `ClipboardHub.qml` schedules a one-shot `gcFollowupTimer` after every
+  `onSaved`, at `grace + 1s` (6 s by default), plus a longer one at startup
+  (`30s + 1s`) for the wider startup grace.
+- The timer is only **started if not already running**, so continuous
+  clipboard activity cannot postpone it forever.
+- The timer honours `CLIPBOARD_HUB_GC_GRACE_SECONDS`, keeping QML and the shell
+  helper in step.
+- `onSaveFailed` still schedules nothing, so a failed write can never cause
+  collection against stale history.
+
+**Result:** a screenshot deleted within the grace window is now guaranteed a
+collector run after the window closes. Retention is bounded to roughly one
+grace period instead of lasting until an unrelated event.
+
+**Verification:** with a 3 s grace, an image deleted 1 s after capture survives
+the immediate pass and is removed by the follow-up; a standalone Quickshell
+probe confirmed the guarded timer still fires under repeated triggers; live
+plugin reload produced no QML errors.
 
 ## General lessons
 
