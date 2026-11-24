@@ -46,8 +46,9 @@ if ! refs=$(jq -r '…' "$HISTORY" 2>/dev/null | sort -u); then exit 0; fi
 ```
 
 Keeping orphans is safe; deleting them on bad input is not. We chose
-fail-closed. An unreadable file is also copied once to `history.json.invalid`
-so a human can recover it later.
+fail-closed. An invalid **but readable** file is also copied once to
+`history.json.invalid` so a human can recover it later; a missing/unreadable
+file has nothing to copy.
 
 **Verification:** corrupt and missing-history tests both keep images; a valid
 empty array removes only genuinely old orphans.
@@ -95,7 +96,8 @@ user.
 default) instead of zero. Old deleted images are still removed immediately —
 they were captured long ago — but a file staged in the last few seconds is
 protected. A single `CLIPBOARD_HUB_GC_GRACE_SECONDS` override covers both the
-startup run (30 s) and the post-save run (5 s).
+startup run (30 s) and the post-save run (5 s); both the shell and QML validate
+it as the same bounded positive integer (see the final addendum).
 
 Also added an atomic `mkdir`-based lock (`$STATE_DIR/.gc.lock`) so back-to-back
 saves cannot run two collectors concurrently.
@@ -476,25 +478,104 @@ but not yet published" versus "published, then removed". We chose to keep the
 grace (it is simple and safe for the capture race) and make sure the window is
 always followed by another collection pass.
 
-**The fix chosen:**
-- `ClipboardHub.qml` schedules a one-shot `gcFollowupTimer` after every
+**The fix chosen (v1.0.3, later corrected):**
+- `ClipboardHub.qml` scheduled a follow-up `gcFollowupTimer` after every
   `onSaved`, at `grace + 1s` (6 s by default), plus a longer one at startup
   (`30s + 1s`) for the wider startup grace.
-- The timer is only **started if not already running**, so continuous
-  clipboard activity cannot postpone it forever.
-- The timer honours `CLIPBOARD_HUB_GC_GRACE_SECONDS`, keeping QML and the shell
-  helper in step.
 - `onSaveFailed` still schedules nothing, so a failed write can never cause
   collection against stale history.
 
-**Result:** a screenshot deleted within the grace window is now guaranteed a
-collector run after the window closes. Retention is bounded to roughly one
-grace period instead of lasting until an unrelated event.
+**Result:** a screenshot deleted within the grace window gets a collector run
+after the window closes, bounding retention to roughly one grace period.
 
 **Verification:** with a 3 s grace, an image deleted 1 s after capture survives
-the immediate pass and is removed by the follow-up; a standalone Quickshell
-probe confirmed the guarded timer still fires under repeated triggers; live
-plugin reload produced no QML errors.
+the immediate pass and is removed by the follow-up; live plugin reload produced
+no QML errors.
+
+**Correction:** the v1.0.3 timer guard was ineffective — see the next addendum.
+
+## Addendum — follow-up review of the follow-up fix (v1.0.4)
+
+A fresh review of v1.0.3 found four more confirmed issues. The most important
+was in the fix above itself.
+
+### The timer guard did not work
+
+**The issue:** `scheduleGcFollowup()` assigned `timer.interval` on *every*
+save, before checking `if (!timer.running)`. Qt's `QTimer::setInterval()`
+stops and restarts a running timer even when the value is unchanged. Back-to-
+back saves therefore kept pushing the follow-up out; with continuous clipboard
+activity it could never run. The old addendum's claim that postponement was
+impossible was wrong.
+
+**The fix:** a 500 ms polling timer plus a list of **absolute deadlines**, one
+per save. A save only appends a deadline and starts the timer if it is stopped.
+Each tick drops all deadlines that have elapsed and runs one collector for
+them; later saves cannot erase or postpone earlier deadlines, and no running
+timer's properties are changed. The startup pass has its own one-shot timer,
+started only after its interval is set, and uses startup mode (wider grace)
+rather than `--now`, which could otherwise collect an image staged during
+startup before its entry is saved.
+
+### Invalid grace override desynchronized QML and the shell
+
+**The issue:** the shell used `CLIPBOARD_HUB_GC_GRACE_SECONDS` directly in
+`touch -d "-$grace seconds"`. Values like `abc`, `0`, or a negative number made
+`touch` fail; its fallback set grace to zero while QML still assumed 5/30 s.
+A just-staged image could then be deleted before its history entry was saved.
+
+**The fix:** both sides accept only a 1–4 digit positive integer up to 3600;
+anything else falls back to the mode's default. The shell no longer silently
+turns a bad override into zero grace.
+
+### A stale lock could disable maintenance forever
+
+**The issue:** `.gc.lock` was an empty lock *directory*. If a collector was
+killed, a later run exited at the `mkdir` check forever, so neither deleted
+images nor temp files were ever cleaned again.
+
+**The fix:** use `flock` on a lock file, which the kernel releases when the
+process dies. An old empty lock directory is removed on upgrade.
+
+### Killed captures left staging files behind
+
+**The issue:** `capture.sh` removes its temp on a normal `EXIT`, but SIGKILL
+does not run traps. `maintain-state.sh` excluded `.clipboard-tmp.*` from image
+GC and only swept `open/`, so up to 10 MiB per file could persist indefinitely.
+
+**The fix:** `capture.sh` exits through its `EXIT` trap on HUP/INT/TERM, and
+`maintain-state.sh` sweeps staging files older than one hour in both the state
+root and `images/`. One hour is far longer than any capture, so in-flight files
+are never swept.
+
+### Failed process starts were invisible
+
+Quickshell 0.3.2 emits `runningChanged()` but **not** `exited()` when a process
+fails to start. Short-lived paste workers therefore kept their clipboard text
+in memory, and the `pkill`/watch processes could leave clipboard watching
+silently dead. Added `launched` guards with explicit `running -> false`
+handling for paste workers, the initializer, and both watchers, plus a
+verified standalone probe that the `runningChanged` path detects a missing
+binary.
+
+### Image path validation was only a prefix check
+
+`safeImagePath()` accepted `<imageDir>/../../etc/passwd`. It now accepts only
+the flat, 64-hex-hash filenames with known image extensions that `capture.sh`
+produces, so traversal and nested/odd paths are rejected before any external
+command receives them.
+
+### Long file URI lists were classified after truncation
+
+`cappedEntry()` cut text at 8 KiB before `buildRow()` checked for `file://`
+lines. A long multi-file list could be cut mid-URI and shown as plain text.
+Classification and preview now use the full entry; only the rendered text
+preview is capped.
+
+**Verification:** syntax and `omarchy plugin validate` pass; sandbox tests
+covered invalid/zero/huge grace values, a pre-existing stale lock directory,
+killed-capture temp cleanup, repeated saves keeping their deadlines, and a
+missing-binary process start.
 
 ## General lessons
 

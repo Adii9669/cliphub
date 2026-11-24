@@ -23,15 +23,20 @@ Item {
   property var history: []
   property int unpinnedLimit: 200
 
-  // Keep the QML follow-up timer in step with the shell GC grace windows.
-  property int gcNowGraceSeconds: {
-    var v = Number(Quickshell.env("CLIPBOARD_HUB_GC_GRACE_SECONDS"))
-    return v > 0 ? v : 5
+  // The shell helper validates this override the same way. Invalid values
+  // must not silently become zero grace there while QML assumes otherwise.
+  function gcGraceSeconds(fallback) {
+    var raw = String(Quickshell.env("CLIPBOARD_HUB_GC_GRACE_SECONDS") || "")
+    if (!/^[1-9][0-9]*$/.test(raw)) return fallback
+    var v = Number(raw)
+    return v <= 3600 ? v : fallback
   }
-  property int gcStartupGraceSeconds: {
-    var v = Number(Quickshell.env("CLIPBOARD_HUB_GC_GRACE_SECONDS"))
-    return v > 0 ? v : 30
-  }
+  property int gcNowGraceSeconds: gcGraceSeconds(5)
+  property int gcStartupGraceSeconds: gcGraceSeconds(30)
+  // Absolute deadlines, one per save. A later save must not cancel an earlier
+  // deadline, otherwise a file deleted in the first grace window could still
+  // be stranded when clipboard activity is continuous.
+  property var gcFollowupDues: []
 
   // emoji state
   property string emojiFilterText: ""
@@ -162,16 +167,14 @@ Item {
   }
 
   // The immediate collector protects files inside its grace window, but an
-  // image deleted during that window is still on disk afterwards. Schedule a
-  // second pass just after the window closes so it is not left behind until
-  // the next unrelated clipboard event or restart.
-  function scheduleGcFollowup(startup) {
-    var timer = startup ? gcStartupFollowup : gcFollowupTimer
-    var grace = startup ? root.gcStartupGraceSeconds : root.gcNowGraceSeconds
-    timer.interval = grace * 1000 + 1000
-    // Do not push the deadline out on every save: continuous clipboard
-    // activity must not postpone the pass forever.
-    if (!timer.running) timer.start()
+  // image deleted during that window is still on disk afterwards. Record an
+  // absolute deadline for a second pass after the window closes. Never change
+  // a running timer's interval: Qt restarts it on any property write, which
+  // would let continuous clipboard activity postpone the pass forever.
+  function scheduleGcFollowup() {
+    var grace = root.gcNowGraceSeconds
+    root.gcFollowupDues.push(Date.now() + grace * 1000 + 1000)
+    if (!gcFollowupTimer.running) gcFollowupTimer.start()
   }
 
   function addClipboardEntry(entry) {
@@ -295,12 +298,14 @@ Item {
     root.openClipboardRow(row)
   }
 
-  // Image paths in history.json are data, not authority. Never hand an
-  // arbitrary local path to an external command.
+  // Image paths in history.json are data, not authority. Only accept the flat,
+  // hash-named files capture.sh creates: no traversal, nesting, or odd names.
   function safeImagePath(path) {
     var value = String(path || "")
     var prefix = root.imageDir + "/"
-    return value.indexOf(prefix) === 0 ? value : ""
+    if (value.indexOf(prefix) !== 0) return ""
+    var name = value.slice(prefix.length)
+    return /^[0-9a-f]{64}\.(png|jpg|jpeg|webp|gif|bmp|tiff)$/.test(name) ? value : ""
   }
 
   function runPasteText(row, copyOnly) {
@@ -317,6 +322,7 @@ Item {
     var worker = pasteProcess.createObject(root, { payload: text })
     if (!worker) return
     worker.command = [root.pasteTextScript, copyOnly ? "--copy-only" : "--shift-insert"]
+    worker.launched = true
     worker.running = true
   }
 
@@ -472,9 +478,21 @@ Item {
     Quickshell.execDetached([root.emojiInsertScript, row.emoji])
   }
 
+  function startWatchers() {
+    currentProc.running = true
+    textWatchProc.launched = true
+    textWatchProc.running = true
+    imageWatchProc.launched = true
+    imageWatchProc.running = true
+  }
+
   Component.onCompleted: {
     Quickshell.execDetached(["bash", root.maintainScript])
-    root.scheduleGcFollowup(true)
+    // One extra startup pass after the wider startup grace closes. Its
+    // interval is set here, before the timer starts; it is never rescheduled.
+    gcStartupFollowup.interval = root.gcStartupGraceSeconds * 1000 + 1000
+    gcStartupFollowup.start()
+    initProc.launched = true
     initProc.running = true
   }
 
@@ -502,7 +520,7 @@ Item {
     // follow-up pass cleans anything whose window has since closed.
     onSaved: {
       Quickshell.execDetached(["bash", root.maintainScript, "--now"])
-      root.scheduleGcFollowup(false)
+      root.scheduleGcFollowup()
     }
     onSaveFailed: {
       // Do not collect: the old file may still be the only record of images
@@ -510,18 +528,33 @@ Item {
     }
   }
 
+  // Poll absolute deadlines instead of resetting a running timer. All dues
+  // that have elapsed are coalesced into one collection run.
   Timer {
     id: gcFollowupTimer
-    interval: 6000
-    repeat: false
-    onTriggered: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+    interval: 500
+    repeat: true
+    onTriggered: {
+      var now = Date.now()
+      var pending = []
+      var due = false
+      for (var i = 0; i < root.gcFollowupDues.length; i++) {
+        if (root.gcFollowupDues[i] <= now) due = true
+        else pending.push(root.gcFollowupDues[i])
+      }
+      root.gcFollowupDues = pending
+      if (due) Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+      if (pending.length === 0) stop()
+    }
   }
 
   Timer {
     id: gcStartupFollowup
     interval: 31000
     repeat: false
-    onTriggered: Quickshell.execDetached(["bash", root.maintainScript, "--now"])
+    // Startup mode keeps its wider grace; a --now pass here could delete an
+    // image staged during startup before its history entry is saved.
+    onTriggered: Quickshell.execDetached(["bash", root.maintainScript])
   }
 
   Timer {
@@ -545,20 +578,42 @@ Item {
       id: worker
       stdinEnabled: true
       property string payload: ""
-      // The selected entry's exact text goes to stdin, terminated by NUL.
-      // paste-text.sh exits at that delimiter, so no close/index dependency.
-      onStarted: write(payload + "\u0000")
-      onExited: worker.destroy()
+      property bool launched: false
+      property bool started: false
+      property bool finished: false
+      // Quickshell does not emit exited() when a process fails to start. A
+      // running -> false transition after we launched it covers that case, so
+      // a failed worker never keeps the full clipboard text in memory.
+      function finish() {
+        if (worker.finished) return
+        worker.finished = true
+        worker.destroy()
+      }
+      onStarted: {
+        started = true
+        write(payload + "\u0000")
+      }
+      onExited: finish()
+      onRunningChanged: {
+        if (launched && !running && !started) finish()
+      }
     }
   }
 
   Process {
     id: initProc
     command: ["pkill", "-f", "wl-paste .*--watch .*clipboard-hub/capture\\.sh"]
-    onExited: {
-      currentProc.running = true
-      textWatchProc.running = true
-      imageWatchProc.running = true
+    property bool launched: false
+    property bool handled: false
+    // exited() is not emitted on FailedToStart, so watch the running flag too.
+    function done() {
+      if (handled) return
+      handled = true
+      root.startWatchers()
+    }
+    onExited: done()
+    onRunningChanged: {
+      if (launched && !running) done()
     }
   }
 
@@ -574,7 +629,14 @@ Item {
   Process {
     id: textWatchProc
     command: ["setpriv", "--pdeathsig", "TERM", "wl-paste", "--type", "text", "--watch", root.captureScript, "text"]
-    onExited: watchRestartTimer.restart()
+    property bool launched: false
+    onRunningChanged: {
+      // Also covers FailedToStart, where Quickshell emits no exited() signal.
+      if (launched && !running) {
+        launched = false
+        watchRestartTimer.restart()
+      }
+    }
     stdout: SplitParser {
       onRead: function(data) { root.addClipboardJson(data) }
     }
@@ -583,7 +645,13 @@ Item {
   Process {
     id: imageWatchProc
     command: ["setpriv", "--pdeathsig", "TERM", "wl-paste", "--type", "image/png", "--watch", root.captureScript, "image/png"]
-    onExited: watchRestartTimer.restart()
+    property bool launched: false
+    onRunningChanged: {
+      if (launched && !running) {
+        launched = false
+        watchRestartTimer.restart()
+      }
+    }
     stdout: SplitParser {
       onRead: function(data) { root.addClipboardJson(data) }
     }
@@ -594,8 +662,14 @@ Item {
     interval: 1000
     repeat: false
     onTriggered: {
-      if (!textWatchProc.running) textWatchProc.running = true
-      if (!imageWatchProc.running) imageWatchProc.running = true
+      if (!textWatchProc.running) {
+        textWatchProc.launched = true
+        textWatchProc.running = true
+      }
+      if (!imageWatchProc.running) {
+        imageWatchProc.launched = true
+        imageWatchProc.running = true
+      }
     }
   }
 

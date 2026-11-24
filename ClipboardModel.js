@@ -285,20 +285,22 @@ function cappedEntry(entry) {
 }
 
 function buildRow(entry, fullEntry) {
-  var paths = filePaths(entry)
-  var isFile = paths.length > 0
-  var isImage = entry.type === "image"
+  // Classify against the full entry: a long multi-file URI list can be cut
+  // mid-URI by cappedEntry(), which would otherwise look like plain text.
   var source = fullEntry || entry
-  var previewPath = isImage ? String(entry.path || "") : (isFile && paths.length === 1 && isImagePath(paths[0]) ? paths[0] : "")
+  var paths = filePaths(source)
+  var isFile = paths.length > 0
+  var isImage = source.type === "image"
+  var previewPath = isImage ? String(source.path || "") : (isFile && paths.length === 1 && isImagePath(paths[0]) ? paths[0] : "")
   return {
-    entryType: isFile ? "file" : entry.type,
+    entryType: isFile ? "file" : source.type,
     entryId: String(source.id || makeId(source)),
-    fullText: isImage ? "" : fullText(entry),
-    previewText: previewText(entry),
+    fullText: isImage ? "" : fullText(source),
+    previewText: isFile ? fileEntryText(source) : previewText(entry),
     previewImage: previewPath,
-    path: isImage ? String(entry.path || "") : (isFile && paths.length === 1 ? paths[0] : ""),
-    mime: isImage ? String(entry.mime || "image/png") : "text/plain",
-    pinned: !!entry.pinned
+    path: isImage ? String(source.path || "") : (isFile && paths.length === 1 ? paths[0] : ""),
+    mime: isImage ? String(source.mime || "image/png") : "text/plain",
+    pinned: !!source.pinned
   }
 }
 

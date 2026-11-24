@@ -17,25 +17,36 @@ STATE_DIR="$STATE_HOME/omarchy/clipboard-hub"
 IMAGE_DIR="$STATE_DIR/images"
 OPEN_DIR="$STATE_DIR/open"
 HISTORY="$STATE_DIR/history.json"
-LOCK_DIR="$STATE_DIR/.gc.lock"
+LOCK_FILE="$STATE_DIR/.gc.lock"
 
 # A short grace for post-save runs protects concurrently staged captures while
 # still removing older deleted images immediately. Startup uses a wider window.
-if [[ ${1:-} == "--now" ]]; then
-  grace=${CLIPBOARD_HUB_GC_GRACE_SECONDS:-5}
-else
-  grace=${CLIPBOARD_HUB_GC_GRACE_SECONDS:-30}
+# Validate the override here and in QML identically: an invalid value must
+# never silently become zero grace while the UI assumes the default.
+grace=5
+[[ ${1:-} == "--now" ]] || grace=30
+grace_override=${CLIPBOARD_HUB_GC_GRACE_SECONDS:-}
+if [[ ${#grace_override} -le 4 && $grace_override =~ ^[1-9][0-9]*$ ]] && (( grace_override <= 3600 )); then
+  grace=$grace_override
 fi
 
 mkdir -p "$IMAGE_DIR" "$OPEN_DIR" 2>/dev/null || exit 0
 chmod 700 "$STATE_DIR" "$IMAGE_DIR" "$OPEN_DIR" 2>/dev/null || true
 
-# Several saves can land back to back; serialize the collectors.
-mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+# Several saves can land back to back; serialize the collectors. A lock file
+# held with flock is released even if a collector is killed. Older versions
+# used an empty lock directory, which could be left stale forever.
+rmdir "$LOCK_FILE" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE" 2>/dev/null || exit 0
+  chmod 600 "$LOCK_FILE" 2>/dev/null || true
+  # Wait briefly for a concurrent collector: a scheduled follow-up must not
+  # silently lose its only chance because an immediate save GC holds the lock.
+  flock -w 5 9 || exit 0
+fi
 ref=
 cleanup() {
   [[ -n $ref ]] && rm -f -- "$ref"
-  rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -68,6 +79,10 @@ while IFS= read -r -d '' file; do
     rm -f -- "$file"
   fi
 done < <(find "$IMAGE_DIR" -maxdepth 1 -type f ! -name '.clipboard-tmp.*' ! -newer "$ref" -print0 2>/dev/null)
+
+# Backstop for capture staging files left by an abnormal exit. One hour is far
+# longer than any capture, so an in-flight file is never swept here.
+find "$STATE_DIR" "$IMAGE_DIR" -maxdepth 1 -type f -name '.clipboard-tmp.*' -mmin +60 -delete 2>/dev/null || true
 
 # Backstop for editor temp files whose owning process was killed before its
 # own cleanup trap could run.

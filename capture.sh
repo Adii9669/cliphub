@@ -38,6 +38,10 @@ fi
 
 tmp=
 trap 'rm -f -- "$tmp"' EXIT
+# HUP/INT/TERM end the process without running an EXIT trap in some shells, so
+# explicitly exit through it. SIGKILL is handled by maintain-state.sh's TTL
+# sweep instead.
+trap 'exit 0' HUP INT TERM
 
 # Read at most cap+1 bytes; reject oversized payloads before decoding/storing.
 read_copy() {
